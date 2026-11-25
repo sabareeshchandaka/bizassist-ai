@@ -1,37 +1,55 @@
 
+import mongoose from "mongoose";
+
 import DocumentChunk from "../models/DocumentChunk.js";
 import { generateEmbedding } from "./embeddingService.js";
 
+const EMBEDDING_DIMENSIONS = 384;
+
 const retrieveRelevantChunks = async (question, businessId) => {
   try {
+    // Validate the business workspace.
+    if (!mongoose.isValidObjectId(businessId)) {
+      throw new Error("Invalid business workspace.");
+    }
+
+    // Validate the question.
+    if (
+      typeof question !== "string" ||
+      !question.trim()
+    ) {
+      throw new Error("A valid question is required.");
+    }
+
     console.log("\n========== RAG RETRIEVAL STARTED ==========");
-    console.log("[RAG] Question:", question);
     console.log("[RAG] Business ID:", businessId.toString());
 
-    // Step 1: Generate embedding for the user's question
-    console.log("[RAG] Generating query embedding...");
+    // Generate the question embedding.
+    const queryEmbedding = await generateEmbedding(
+      question.trim()
+    );
 
-    const queryEmbedding = await generateEmbedding(question);
+    // Validate the generated vector.
+    if (
+      !Array.isArray(queryEmbedding) ||
+      queryEmbedding.length !== EMBEDDING_DIMENSIONS ||
+      !queryEmbedding.every(Number.isFinite)
+    ) {
+      throw new Error("Invalid query embedding generated.");
+    }
 
-    console.log("[RAG] Query embedding generated.");
-    console.log("[RAG] Vector dimensions:", queryEmbedding.length);
-
-    // Step 2: Check whether document chunks exist for this business
+    // Check whether this business has indexed chunks.
     const chunkCount = await DocumentChunk.countDocuments({
       business: businessId,
     });
 
-    console.log("[RAG] Total document chunks:", chunkCount);
-
     if (chunkCount === 0) {
-      console.log("[RAG] No document chunks found for this business.");
+      console.log("[RAG] No chunks found.");
       console.log("========== RAG RETRIEVAL FINISHED ==========\n");
       return [];
     }
 
-    // Step 3: Search MongoDB Atlas Vector Search
-    console.log("[RAG] Searching MongoDB Vector Search...");
-
+    // Search only this business's documents.
     const results = await DocumentChunk.aggregate([
       {
         $vectorSearch: {
@@ -58,20 +76,11 @@ const retrieveRelevantChunks = async (question, businessId) => {
     ]);
 
     console.log("[RAG] Retrieved chunks:", results.length);
-
-    results.forEach((chunk, index) => {
-      console.log(`[RAG] Result ${index + 1}:`, {
-        document: chunk.originalName,
-        chunkIndex: chunk.chunkIndex,
-        score: chunk.score,
-      });
-    });
-
     console.log("========== RAG RETRIEVAL FINISHED ==========\n");
 
     return results;
   } catch (error) {
-    console.error("\n[RAG] RETRIEVAL FAILED:", error.message);
+    console.error("[RAG] Retrieval failed:", error.message);
     throw error;
   }
 };

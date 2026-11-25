@@ -8,56 +8,109 @@ import DocumentChunk from "../models/DocumentChunk.js";
 
 import chunkText from "../utils/textChunker.js";
 import { generateEmbeddings } from "../services/embeddingService.js";
+import path from "path"
+
+const MAX_PDF_PAGES = 100;
+const MAX_EXTRACTED_CHARACTERS = 500_000;
+
+const createProcessingError = (message, statusCode = 400) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+};
+
+const checkTextSize = (text) => {
+  if (text.length > MAX_EXTRACTED_CHARACTERS) {
+    throw createProcessingError(
+      "This document contains too much text. Please upload a smaller document."
+    );
+  }
+};
 
 const extractDocumentText = async (file) => {
-  const extension = file.originalname
-    .split(".")
-    .pop()
-    .toLowerCase();
+  const extension = path.extname(file.originalname).toLowerCase();
 
-  if (extension === "txt") {
-    return file.buffer.toString("utf-8");
+  if (extension === ".txt") {
+    const text = file.buffer.toString("utf-8");
+    checkTextSize(text);
+    return text;
   }
 
-  if (extension === "pdf") {
+  if (extension === ".pdf") {
     const loadingTask = pdfjsLib.getDocument({
       data: new Uint8Array(file.buffer),
       useSystemFonts: true,
     });
 
-    const pdfDocument = await loadingTask.promise;
-    const pages = [];
+    try {
+      const pdfDocument = await loadingTask.promise;
 
-    for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
-      const page = await pdfDocument.getPage(pageNumber);
-      const textContent = await page.getTextContent();
+      if (pdfDocument.numPages > MAX_PDF_PAGES) {
+        throw createProcessingError(
+          `PDF files cannot contain more than ${MAX_PDF_PAGES} pages.`
+        );
+      }
 
-      pages.push(
-        textContent.items.map((item) => item.str || "").join(" ")
-      );
+      const pages = [];
+      let totalCharacters = 0;
+
+      for (
+        let pageNumber = 1;
+        pageNumber <= pdfDocument.numPages;
+        pageNumber++
+      ) {
+        const page = await pdfDocument.getPage(pageNumber);
+
+        try {
+          const textContent = await page.getTextContent();
+
+          const pageText = textContent.items
+            .map((item) => item.str || "")
+            .join(" ");
+
+          totalCharacters += pageText.length;
+
+          if (totalCharacters > MAX_EXTRACTED_CHARACTERS) {
+            throw createProcessingError(
+              "This PDF contains too much text. Please upload a smaller document."
+            );
+          }
+
+          pages.push(pageText);
+        } finally {
+          page.cleanup();
+        }
+      }
+
+      return pages.join("\n");
+    } finally {
+      await loadingTask.destroy();
     }
-
-    return pages.join("\n");
   }
 
-  if (extension === "docx") {
+  if (extension === ".docx") {
     const result = await mammoth.extractRawText({
       buffer: file.buffer,
     });
 
+    checkTextSize(result.value);
+
     return result.value;
   }
 
-  throw new Error("Unsupported document format.");
+  throw createProcessingError("Unsupported document format.");
 };
 
+
 // POST /api/documents/upload
+
 export const uploadDocument = async (req, res) => {
-  let createdDocument = null;
+  let session;
 
   try {
     if (!req.file) {
       return res.status(400).json({
+        success: false,
         message: "Please select a document to upload.",
       });
     }
@@ -66,61 +119,96 @@ export const uploadDocument = async (req, res) => {
 
     if (!businessId || !mongoose.isValidObjectId(businessId)) {
       return res.status(400).json({
+        success: false,
         message: "A valid business workspace is required.",
       });
     }
 
+    // Extract and process the document before opening a transaction.
     const extractedText = await extractDocumentText(req.file);
     const cleanedText = extractedText.trim();
 
     if (!cleanedText) {
       return res.status(400).json({
+        success: false,
         message: "No readable text was found in this document.",
       });
     }
 
-    // Split the extracted text into smaller pieces.
     const chunks = chunkText(cleanedText);
 
-    if (chunks.length === 0) {
+    if (!chunks.length) {
       return res.status(400).json({
+        success: false,
         message: "Unable to create document chunks.",
       });
     }
 
-    console.log(`Generating embeddings for ${chunks.length} chunks...`);
-
-    // Generate one vector for each chunk.
+    // Generate embeddings before opening the transaction.
     const embeddings = await generateEmbeddings(chunks);
 
-    if (embeddings.length !== chunks.length) {
+    if (
+      !Array.isArray(embeddings) ||
+      embeddings.length !== chunks.length
+    ) {
       throw new Error("Embedding count does not match chunk count.");
     }
 
-    // Save the original document.
-    createdDocument = await Document.create({
-      business: businessId,
-      uploadedBy: req.user._id,
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
-      content: cleanedText,
-      status: "processed",
+    // Validate every embedding.
+    if (
+      embeddings.some(
+        (embedding) =>
+          !Array.isArray(embedding) ||
+          embedding.length !== 384 ||
+          !embedding.every(Number.isFinite)
+      )
+    ) {
+      throw new Error("One or more document embeddings are invalid.");
+    }
+
+    // Start the database transaction.
+    session = await mongoose.startSession();
+
+    let createdDocument;
+
+    await session.withTransaction(async () => {
+      // Save the document.
+      const documents = await Document.create(
+        [
+          {
+            business: businessId,
+            uploadedBy: req.user._id,
+            originalName: req.file.originalname,
+            mimeType: req.file.mimetype,
+            size: req.file.size,
+            content: cleanedText,
+            status: "processed",
+          },
+        ],
+        { session }
+      );
+
+      createdDocument = documents[0];
+
+      // Prepare searchable chunks.
+      const chunkRecords = chunks.map((text, index) => ({
+        business: businessId,
+        document: createdDocument._id,
+        originalName: req.file.originalname,
+        chunkIndex: index,
+        text,
+        embedding: embeddings[index],
+      }));
+
+      // Save all chunks within the same transaction.
+      await DocumentChunk.insertMany(chunkRecords, {
+        session,
+        ordered: true,
+      });
     });
 
-    // Save chunks and embeddings separately.
-    const chunkRecords = chunks.map((text, index) => ({
-      business: businessId,
-      document: createdDocument._id,
-      originalName: req.file.originalname,
-      chunkIndex: index,
-      text,
-      embedding: embeddings[index],
-    }));
-
-    await DocumentChunk.insertMany(chunkRecords);
-
     return res.status(201).json({
+      success: true,
       message: "Document uploaded and indexed successfully.",
       document: {
         _id: createdDocument._id,
@@ -132,22 +220,19 @@ export const uploadDocument = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Document upload error:", error);
+    console.error("Document upload error:", error.message);
 
-    // Avoid leaving an original document without its chunks.
-    if (createdDocument) {
-      await DocumentChunk.deleteMany({
-        document: createdDocument._id,
-      }).catch(() => {});
-
-      await Document.findByIdAndDelete(
-        createdDocument._id
-      ).catch(() => {});
-    }
-
-    return res.status(500).json({
-      message: "Unable to process and index this document.",
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      message:
+        error.statusCode === 400
+          ? error.message
+          : "Unable to process and index this document.",
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
 
@@ -174,41 +259,77 @@ export const getDocuments = async (req, res) => {
 };
 
 // DELETE /api/documents/:id
+
 export const deleteDocument = async (req, res) => {
+  let session;
+
   try {
     const { id } = req.params;
+    const businessId = req.user.business;
 
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({
+        success: false,
         message: "Invalid document ID.",
       });
     }
 
-    const document = await Document.findOneAndDelete({
-      _id: id,
-      business: req.user.business,
+    if (!businessId || !mongoose.isValidObjectId(businessId)) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid business workspace is required.",
+      });
+    }
+
+    session = await mongoose.startSession();
+
+    let deletedDocument = null;
+
+    await session.withTransaction(async () => {
+      // Find and delete only a document belonging to this business.
+      deletedDocument = await Document.findOneAndDelete(
+        {
+          _id: id,
+          business: businessId,
+        },
+        { session }
+      );
+
+      if (!deletedDocument) {
+        return;
+      }
+
+      // Delete its searchable chunks in the same transaction.
+      await DocumentChunk.deleteMany(
+        {
+          document: deletedDocument._id,
+          business: businessId,
+        },
+        { session }
+      );
     });
 
-    if (!document) {
+    if (!deletedDocument) {
       return res.status(404).json({
+        success: false,
         message: "Document not found in your workspace.",
       });
     }
 
-    // Also remove all searchable chunks belonging to this document.
-    await DocumentChunk.deleteMany({
-      document: document._id,
-      business: req.user.business,
-    });
-
     return res.status(200).json({
+      success: true,
       message: "Document and its indexed chunks deleted successfully.",
     });
   } catch (error) {
     console.error("Delete document error:", error.message);
 
     return res.status(500).json({
+      success: false,
       message: "Unable to delete document.",
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
