@@ -72,43 +72,46 @@ app.use(
 
 const allowedOrigins = (process.env.CLIENT_URL || "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
+
 
 const apiCorsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(null, false);
-  },
-  credentials: true,
-};
-
-app.use(cors(apiCorsOptions));
-
-
-const corsOptions = {
-  origin: (origin, callback) => {
-    // Allow requests without an Origin header,
-    // such as server-to-server requests.
+    // Allow requests without an Origin header.
     if (!origin) {
       return callback(null, true);
     }
 
+    // Allow configured frontend origins.
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
+    console.warn("Blocked CORS origin:", origin);
+
     return callback(new Error("Origin not allowed by CORS"));
   },
+
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
+
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+  ],
 };
 
-app.use(cors(corsOptions));
+app.use(cors(apiCorsOptions));
+
 
 app.use("/api/auth", authRoutes);
 app.use("/api/business", businessRoutes);
