@@ -38,6 +38,10 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/favicon.ico", (req, res) => {
+  res.status(204).end();
+});
+
 // Security middleware
 app.use(helmet());
 
