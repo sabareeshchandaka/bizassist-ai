@@ -6,17 +6,26 @@ import Business from "../models/Business.js";
 import retrieveRelevantChunks from "../services/retrievalService.js";
 import generateAIResponse from "../services/aiService.js";
 
+const MAX_HISTORY_MESSAGES = 10;
+
 const isAllowedOrigin = (origin, allowedDomains) => {
   if (!origin) return false;
 
-  let hostname;
+  let parsedOrigin;
 
   try {
-    hostname = new URL(origin).hostname.toLowerCase();
+    parsedOrigin = new URL(origin);
   } catch {
     return false;
   }
 
+  if (!["https:", "http:"].includes(parsedOrigin.protocol)) {
+    return false;
+  }
+
+  const hostname = parsedOrigin.hostname.toLowerCase();
+
+  // Development-only localhost support.
   if (
     process.env.NODE_ENV !== "production" &&
     ["localhost", "127.0.0.1"].includes(hostname)
@@ -24,7 +33,8 @@ const isAllowedOrigin = (origin, allowedDomains) => {
     return true;
   }
 
-  return allowedDomains.includes(hostname);
+  return Array.isArray(allowedDomains) &&
+    allowedDomains.includes(hostname);
 };
 
 // GET /api/public-chat/config/:widgetId
@@ -34,7 +44,8 @@ export const getPublicWidgetConfig = async (req, res) => {
 
     if (!/^[a-f0-9]{32}$/i.test(widgetId)) {
       return res.status(400).json({
-        message: "Invalid widget ID",
+        success: false,
+        message: "Invalid widget ID.",
       });
     }
 
@@ -42,12 +53,13 @@ export const getPublicWidgetConfig = async (req, res) => {
       widgetId,
       enabled: true,
     }).select(
-      "widgetId assistantName welcomeMessage primaryColor allowedDomains enabled"
+      "widgetId assistantName welcomeMessage primaryColor allowedDomains"
     );
 
     if (!config) {
       return res.status(404).json({
-        message: "Widget not found or disabled",
+        success: false,
+        message: "Widget not found or disabled.",
       });
     }
 
@@ -55,7 +67,8 @@ export const getPublicWidgetConfig = async (req, res) => {
 
     if (!isAllowedOrigin(origin, config.allowedDomains || [])) {
       return res.status(403).json({
-        message: "This website is not authorized to use this widget",
+        success: false,
+        message: "This website is not authorized to use this widget.",
       });
     }
 
@@ -68,10 +81,11 @@ export const getPublicWidgetConfig = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("[PUBLIC WIDGET CONFIG] Error:", error.message);
+    console.error("[PUBLIC WIDGET CONFIG]", error.message);
 
     return res.status(500).json({
-      message: "Unable to load widget configuration",
+      success: false,
+      message: "Unable to load widget configuration.",
     });
   }
 };
@@ -79,63 +93,13 @@ export const getPublicWidgetConfig = async (req, res) => {
 // POST /api/public-chat/message
 export const sendPublicMessage = async (req, res) => {
   try {
-    const { widgetId, visitorId, messages } = req.body;
+    const {
+      widgetId,
+      visitorId,
+      latestMessage,
+    } = req.publicChat;
 
-    // Validate widget ID.
-    if (
-      typeof widgetId !== "string" ||
-      !/^[a-f0-9]{32}$/i.test(widgetId)
-    ) {
-      return res.status(400).json({
-        message: "Invalid widget ID",
-      });
-    }
-
-    // Validate visitor session ID.
-    if (
-      typeof visitorId !== "string" ||
-      !/^[a-f0-9-]{36}$/i.test(visitorId)
-    ) {
-      return res.status(400).json({
-        message: "Invalid visitor session",
-      });
-    }
-
-    // Validate messages.
-    if (
-      !Array.isArray(messages) ||
-      messages.length === 0 ||
-      messages.length > 12
-    ) {
-      return res.status(400).json({
-        message: "Invalid conversation messages",
-      });
-    }
-
-    const validMessages = messages.every(
-      (message) =>
-        message &&
-        ["user", "assistant"].includes(message.role) &&
-        typeof message.content === "string" &&
-        message.content.trim().length > 0 &&
-        message.content.length <= 2000
-    );
-
-    if (!validMessages) {
-      return res.status(400).json({
-        message: "One or more messages are invalid",
-      });
-    }
-
-    const latestMessage = messages[messages.length - 1];
-
-    if (latestMessage.role !== "user") {
-      return res.status(400).json({
-        message: "The latest message must be from the visitor",
-      });
-    }
-
-    // Find widget configuration.
+    // Verify the widget exists and is enabled.
     const config = await WidgetConfig.findOne({
       widgetId,
       enabled: true,
@@ -143,33 +107,64 @@ export const sendPublicMessage = async (req, res) => {
 
     if (!config) {
       return res.status(404).json({
-        message: "This AI assistant is unavailable",
+        success: false,
+        message: "This AI assistant is unavailable.",
       });
     }
 
-    // Verify website origin.
+    // Verify the requesting website.
     const origin = req.get("origin");
 
     if (!isAllowedOrigin(origin, config.allowedDomains || [])) {
       return res.status(403).json({
-        message: "This website is not authorized to use this widget",
+        success: false,
+        message: "This website is not authorized to use this widget.",
       });
     }
 
-    // Find the business that owns this widget.
+    // Find the business associated with this widget.
     const business = await Business.findById(config.business);
 
     if (!business) {
       return res.status(404).json({
-        message: "Business not found",
+        success: false,
+        message: "Business not found.",
       });
     }
 
-    // Retrieve business-specific knowledge.
-    console.log("[PUBLIC CHAT] Retrieving business knowledge...");
+    // Load trusted conversation history from MongoDB.
+    // Do not trust assistant messages supplied by the browser.
+    const existingConversation = await WidgetConversation.findOne({
+      business: business._id,
+      widgetId,
+      visitorId,
+    }).select("messages");
 
+    const previousMessages = (
+      existingConversation?.messages || []
+    )
+      .filter(
+        (message) =>
+          ["user", "assistant"].includes(message.role) &&
+          typeof message.content === "string"
+      )
+      .slice(-MAX_HISTORY_MESSAGES)
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+
+    const conversationMessages = [
+      ...previousMessages,
+      {
+        role: "user",
+        content: latestMessage,
+      },
+    ];
+
+    // Retrieve only this business's knowledge.
     const relevantChunks = await retrieveRelevantChunks(
-      latestMessage.content,
+      latestMessage,
       business._id
     );
 
@@ -180,19 +175,18 @@ export const sendPublicMessage = async (req, res) => {
       )
       .join("\n\n");
 
-    console.log(
-      "[PUBLIC CHAT] Retrieved chunks:",
-      relevantChunks.length
-    );
-
-    // Generate AI response.
+    // Generate the AI response.
     const reply = await generateAIResponse(
-      messages,
+      conversationMessages,
       business.name,
       knowledgeContext
     );
 
-    // Save the visitor question and AI response.
+    if (typeof reply !== "string" || !reply.trim()) {
+      throw new Error("AI returned an invalid response.");
+    }
+
+    // Save the visitor message and assistant response.
     const conversation = await WidgetConversation.findOneAndUpdate(
       {
         business: business._id,
@@ -204,7 +198,7 @@ export const sendPublicMessage = async (req, res) => {
           business: business._id,
           widgetId,
           visitorId,
-          firstMessage: latestMessage.content.trim(),
+          firstMessage: latestMessage,
           status: "active",
         },
         $push: {
@@ -212,13 +206,14 @@ export const sendPublicMessage = async (req, res) => {
             $each: [
               {
                 role: "user",
-                content: latestMessage.content.trim(),
+                content: latestMessage,
               },
               {
                 role: "assistant",
-                content: reply,
+                content: reply.trim(),
               },
             ],
+            $slice: -100,
           },
         },
         $inc: {
@@ -234,25 +229,22 @@ export const sendPublicMessage = async (req, res) => {
         new: true,
         upsert: true,
         runValidators: true,
+        setDefaultsOnInsert: true,
       }
-    );
-
-    console.log(
-      "[PUBLIC CHAT] Conversation saved:",
-      conversation._id.toString()
     );
 
     return res.status(200).json({
       success: true,
-      reply,
+      reply: reply.trim(),
       assistantName: config.assistantName,
       conversationId: conversation._id,
     });
   } catch (error) {
-    console.error("[PUBLIC CHAT] Error:", error.message);
+    console.error("[PUBLIC CHAT]", error.message);
 
     return res.status(500).json({
-      message: "The AI assistant could not process your message",
+      success: false,
+      message: "The AI assistant could not process your message.",
     });
   }
 };

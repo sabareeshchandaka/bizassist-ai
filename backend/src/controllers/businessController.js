@@ -70,6 +70,20 @@ export const updateBusinessProfile = async (req, res) => {
       });
     }
 
+
+const ownedBusiness = await Business.findOne({
+  _id: businessId,
+  owner: req.user._id,
+}).select("_id");
+
+if (!ownedBusiness) {
+  return res.status(403).json({
+    success: false,
+    message: "You are not authorized to update this business.",
+  });
+}
+
+
     if (!mongoose.Types.ObjectId.isValid(businessId)) {
       return res.status(400).json({
         success: false,

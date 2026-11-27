@@ -171,80 +171,44 @@ export const getAnalyticsOverview = async (req, res) => {
 
 // GET /api/analytics/conversations
 export const getWidgetConversations = async (req, res) => {
-  try {
-    const businessId = req.user.business;
 
-    const page = Math.max(
-      1,
-      Number.parseInt(req.query.page, 10) || 1
-    );
+const rawPage = Number(req.query.page ?? 1);
+const rawLimit = Number(req.query.limit ?? 10);
 
-    const limit = Math.min(
-      50,
-      Math.max(1, Number.parseInt(req.query.limit, 10) || 10)
-    );
+if (
+  !Number.isSafeInteger(rawPage) ||
+  rawPage < 1 ||
+  rawPage > 10000
+) {
+  return res.status(400).json({
+    success: false,
+    message: "Invalid page number.",
+  });
+}
 
-    const search = String(req.query.search || "").trim();
+if (
+  !Number.isSafeInteger(rawLimit) ||
+  rawLimit < 1
+) {
+  return res.status(400).json({
+    success: false,
+    message: "Invalid page size.",
+  });
+}
 
-    const filter = {
-      business: businessId,
-    };
+const page = rawPage;
+const limit = Math.min(50, rawLimit);
 
-    // Escape special regex characters before searching.
-    if (search) {
-      const escapedSearch = search.replace(
-        /[.*+?^${}()|[\]\\]/g,
-        "\\$&"
-      );
+const search = String(req.query.search || "").trim();
 
-      filter.$or = [
-        {
-          firstMessage: {
-            $regex: escapedSearch,
-            $options: "i",
-          },
-        },
-        {
-          "messages.content": {
-            $regex: escapedSearch,
-            $options: "i",
-          },
-        },
-      ];
-    }
+if (search.length > 100) {
+  return res.status(400).json({
+    success: false,
+    message: "Search query cannot exceed 100 characters.",
+  });
+}
 
-    const total = await WidgetConversation.countDocuments(filter);
-
-    const conversations = await WidgetConversation.find(filter)
-      .select(
-        "visitorId firstMessage messageCount userMessageCount assistantMessageCount lastMessageAt status createdAt"
-      )
-      .sort({ lastMessageAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
-
-    return res.status(200).json({
-      success: true,
-      conversations,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-      },
-    });
-  } catch (error) {
-    console.error(
-      "[CONVERSATION HISTORY] List error:",
-      error.message
-    );
-
-    return res.status(500).json({
-      message: "Unable to load conversation history",
-    });
-  }
-};
+}
 
 
 // GET /api/analytics/conversations/:conversationId

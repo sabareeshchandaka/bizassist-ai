@@ -15,9 +15,17 @@ import widgetRoutes from "./routes/widgetRoutes.js";
 import publicChatRoutes from "./routes/publicChatRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 
+import {
+  notFoundMiddleware,
+  errorMiddleware,
+} from "./middleware/errorMiddleware.js";
+
 dotenv.config();
 
 const app = express();
+if(process.env.NODE_ENV === "production"){
+  app.set("trust proxy",1);
+}
 
 app.use(helmet());
 
@@ -54,12 +62,40 @@ app.use(
 );
 
 // Private APIs: only your frontend origin.
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL,
-    credentials: true,
-  })
-);
+const allowedOrigins = (
+  process.env.CLIENT_URL || ""
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+if (process.env.NODE_ENV !== "production") {
+  allowedOrigins.push(
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+  );
+}
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests without an Origin header,
+    // such as server-to-server requests.
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error("Origin not allowed by CORS"));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/business", businessRoutes);
@@ -69,16 +105,27 @@ app.use("/api/widget", widgetRoutes);
 app.use("/api/analytics", analyticsRoutes);
 
 // Unknown routes
-app.use((req, res) => {
-  res.status(404).json({
-    message: "API route not found",
-  });
-});
+app.use(notFoundMiddleware);
+app.use(errorMiddleware);
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
+    if (
+  process.env.NODE_ENV === "production" &&
+  !process.env.CLIENT_URL
+) {
+  throw new Error("CLIENT_URL is required in production.");
+}
+
+if (!process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET is required.");
+}
+
+if (!process.env.DEEPSEEK_API_KEY) {
+  throw new Error("DEEPSEEK_API_KEY is required.");
+}
     await connectDB();
 
     app.listen(PORT, () => {

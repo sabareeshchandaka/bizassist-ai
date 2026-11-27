@@ -2,6 +2,7 @@
 import express from "express";
 
 import authMiddleware from "../middleware/authMiddleware.js";
+import authorizeRoles from "../middleware/authorizeRoles.js";
 
 import {
   getWidgetConfig,
@@ -13,6 +14,11 @@ const router = express.Router();
 router.use(authMiddleware);
 
 router.get("/config", getWidgetConfig);
-router.put("/config", updateWidgetConfig);
+
+router.put(
+  "/config",
+  authorizeRoles("owner"),
+  updateWidgetConfig
+);
 
 export default router;

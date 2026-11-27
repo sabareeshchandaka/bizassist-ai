@@ -199,96 +199,95 @@ export const sendMessage = async (req, res) => {
       });
     }
 
-    let conversation;
+    
+let conversation;
 
-    if (conversationId) {
-      if (!mongoose.isValidObjectId(conversationId)) {
-        return res.status(400).json({
-          message: "Invalid conversation ID",
-        });
-      }
-
-      conversation = await Conversation.findOne({
-        _id: conversationId,
-        business: business._id,
-        user: req.user._id,
-      });
-
-      if (!conversation) {
-        return res.status(404).json({
-          message: "Conversation not found",
-        });
-      }
-    } else {
-      conversation = await Conversation.create({
-        business: business._id,
-        user: req.user._id,
-        title: message.trim().slice(0, 60),
-        messages: [],
-      });
-    }
-
-    // Automatically title a conversation when its first message arrives
-    if (
-      conversation.messages.length === 0 ||
-      conversation.title === "New Conversation"
-    ) {
-      conversation.title = message.trim().slice(0, 60);
-    }
-
-    // Save the user's message in memory
-    conversation.messages.push({
-      role: "user",
-      content: message.trim(),
+if (conversationId) {
+  if (!mongoose.isValidObjectId(conversationId)) {
+    return res.status(400).json({
+      message: "Invalid conversation ID",
     });
+  }
 
-    const contextMessages = conversation.messages.slice(-12);
+  conversation = await Conversation.findOne({
+    _id: conversationId,
+    business: business._id,
+    user: req.user._id,
+  });
 
-    // RAG: retrieve relevant business document chunks
-    console.log("[RAG] Calling document retrieval...");
-
-    const relevantChunks = await retrieveRelevantChunks(
-      message.trim(),
-      req.user.business
-    );
-
-    console.log(
-      "[RAG] Retrieved chunks:",
-      relevantChunks.length
-    );
-
-    const knowledgeContext = relevantChunks
-      .map(
-        (chunk, index) => `
-Source ${index + 1}: ${chunk.originalName}
-${chunk.text}
-`
-      )
-      .join("\n\n");
-
-    console.log(
-      "[RAG] Knowledge context length:",
-      knowledgeContext.length
-    );
-
-    // Generate the AI response
-    const reply = await generateAIResponse(
-      contextMessages,
-      business.name,
-      knowledgeContext
-    );
-
-    if (!reply) {
-      throw new Error("AI returned an empty response");
-    }
-
-    // Save the assistant response
-    conversation.messages.push({
-      role: "assistant",
-      content: reply,
+  if (!conversation) {
+    return res.status(404).json({
+      message: "Conversation not found",
     });
+  }
+} else {
+  // Create an unsaved conversation.
+  // It will only be saved after successful AI generation.
+  conversation = new Conversation({
+    business: business._id,
+    user: req.user._id,
+    title: "New Conversation",
+    messages: [],
+  });
+}
 
-    await conversation.save();
+// Prepare messages without modifying the stored conversation.
+const userMessage = {
+  role: "user",
+  content: message.trim(),
+};
+
+const contextMessages = [
+  ...conversation.messages.slice(-10).map((item) => ({
+    role: item.role,
+    content: item.content,
+  })),
+  userMessage,
+];
+
+// Retrieve business-specific knowledge.
+const relevantChunks = await retrieveRelevantChunks(
+  message.trim(),
+  business._id
+);
+
+const knowledgeContext = relevantChunks
+  .map(
+    (chunk, index) =>
+      `Source ${index + 1}: ${chunk.originalName}\n${chunk.text}`
+  )
+  .join("\n\n");
+
+// Generate the AI response before changing stored conversation data.
+const reply = await generateAIResponse(
+  contextMessages,
+  business.name,
+  knowledgeContext
+);
+
+if (typeof reply !== "string" || !reply.trim()) {
+  throw new Error("AI returned an empty response");
+}
+
+// Update conversation only after successful AI generation.
+if (
+  conversation.messages.length === 0 ||
+  conversation.title === "New Conversation"
+) {
+  conversation.title = message.trim().slice(0, 60);
+}
+
+conversation.messages.push(userMessage);
+
+conversation.messages.push({
+  role: "assistant",
+  content: reply.trim(),
+});
+
+// Retain the latest 100 messages.
+conversation.messages = conversation.messages.slice(-100);
+
+await conversation.save();
 
     return res.status(200).json({
       message: "AI response generated successfully",

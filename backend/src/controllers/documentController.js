@@ -28,7 +28,9 @@ const checkTextSize = (text) => {
 };
 
 const extractDocumentText = async (file) => {
-  const extension = path.extname(file.originalname).toLowerCase();
+  const extension = path
+      .extname(path.basename(file.originalname))
+      .toLowerCase();
 
   if (extension === ".txt") {
     const text = file.buffer.toString("utf-8");
@@ -102,6 +104,16 @@ const extractDocumentText = async (file) => {
 };
 
 
+
+const sanitizeFileName = (fileName) => {
+  return path
+    .basename(fileName)
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, 255);
+};
+
+
 // POST /api/documents/upload
 
 export const uploadDocument = async (req, res) => {
@@ -114,7 +126,16 @@ export const uploadDocument = async (req, res) => {
         message: "Please select a document to upload.",
       });
     }
+const safeOriginalName = sanitizeFileName(
+  req.file.originalname
+);
 
+if (!safeOriginalName) {
+  return res.status(400).json({
+    success: false,
+    message: "Invalid document filename.",
+  });
+}
     const businessId = req.user.business;
 
     if (!businessId || !mongoose.isValidObjectId(businessId)) {
@@ -178,7 +199,7 @@ export const uploadDocument = async (req, res) => {
           {
             business: businessId,
             uploadedBy: req.user._id,
-            originalName: req.file.originalname,
+            originalName: safeOriginalName,
             mimeType: req.file.mimetype,
             size: req.file.size,
             content: cleanedText,
@@ -194,7 +215,7 @@ export const uploadDocument = async (req, res) => {
       const chunkRecords = chunks.map((text, index) => ({
         business: businessId,
         document: createdDocument._id,
-        originalName: req.file.originalname,
+        originalName: safeOriginalName,
         chunkIndex: index,
         text,
         embedding: embeddings[index],

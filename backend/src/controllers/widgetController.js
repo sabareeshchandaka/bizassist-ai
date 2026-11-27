@@ -23,10 +23,18 @@ export const getWidgetConfig = async (req, res) => {
     const config = await getOrCreateConfig(
       req.user.business
     );
+    const safeConfig = {
+  widgetId: config.widgetId,
+  enabled: config.enabled,
+  assistantName: config.assistantName,
+  welcomeMessage: config.welcomeMessage,
+  primaryColor: config.primaryColor,
+  allowedDomains: config.allowedDomains,
+};
 
     res.status(200).json({
       success: true,
-      config,
+      config: safeConfig,
     });
   } catch (error) {
     console.error("Get widget config error:", error.message);
