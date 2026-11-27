@@ -23,6 +23,13 @@ import {
 dotenv.config();
 
 const app = express();
+
+// Trust Render's reverse proxy in production
+if (process.env.NODE_ENV === "production") {
+  app.set("trust proxy", 1);
+}
+
+// Root route
 app.get("/", (req, res) => {
   res.status(200).json({
     success: true,
@@ -30,22 +37,12 @@ app.get("/", (req, res) => {
     health: "/api/health",
   });
 });
-if(process.env.NODE_ENV === "production"){
-  app.set("trust proxy",1);
-}
 
+// Security middleware
 app.use(helmet());
 
+// Parse JSON requests
 app.use(express.json({ limit: "1mb" }));
-
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 100,
-  standardHeaders: "draft-8",
-  legacyHeaders: false,
-});
-
-app.use("/api", apiLimiter);
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -55,40 +52,33 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Public widget chat.
-// This route accepts browser requests from authorized
-// business websites. The controller checks the Origin.
+// Public widget chat CORS
+// The controller checks whether the requesting website is authorized.
 app.use(
   "/api/public-chat",
   cors({
     origin: true,
-    methods: ["GET","POST", "OPTIONS"],
+    methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
   }),
   publicChatRoutes
 );
 
-// Private APIs: only your frontend origin.
-
+// Allowed frontend origins
 const allowedOrigins = (process.env.CLIENT_URL || "")
   .split(",")
   .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
-
+// Global CORS configuration
 const apiCorsOptions = {
   origin: (origin, callback) => {
-    // Allow requests without an Origin header.
-    if (!origin) {
+    // Allow requests without an Origin header
+    if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
-    // Allow configured frontend origins.
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    console.warn("Blocked CORS origin:", origin);
+    console.warn("Blocked CORS Origin:", origin);
 
     return callback(new Error("Origin not allowed by CORS"));
   },
@@ -110,9 +100,21 @@ const apiCorsOptions = {
   ],
 };
 
+// Apply CORS before rate limiting and API routes
 app.use(cors(apiCorsOptions));
 
+// API rate limiter
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+});
 
+// Apply rate limiting after CORS
+app.use("/api", apiLimiter);
+
+// API routes
 app.use("/api/auth", authRoutes);
 app.use("/api/business", businessRoutes);
 app.use("/api/chat", chatRoutes);
@@ -120,35 +122,44 @@ app.use("/api/documents", documentRoutes);
 app.use("/api/widget", widgetRoutes);
 app.use("/api/analytics", analyticsRoutes);
 
-// Unknown routes
+// Handle unknown routes
 app.use(notFoundMiddleware);
+
+// Global error handler
 app.use(errorMiddleware);
 
+// Server port
 const PORT = process.env.PORT || 5000;
 
+// Start server
 const startServer = async () => {
   try {
+    // Validate required environment variables
     if (
-  process.env.NODE_ENV === "production" &&
-  !process.env.CLIENT_URL
-) {
-  throw new Error("CLIENT_URL is required in production.");
-}
+      process.env.NODE_ENV === "production" &&
+      !process.env.CLIENT_URL
+    ) {
+      throw new Error("CLIENT_URL is required in production.");
+    }
 
-if (!process.env.JWT_SECRET) {
-  throw new Error("JWT_SECRET is required.");
-}
+    if (!process.env.JWT_SECRET) {
+      throw new Error("JWT_SECRET is required.");
+    }
 
-if (!process.env.DEEPSEEK_API_KEY) {
-  throw new Error("DEEPSEEK_API_KEY is required.");
-}
+    if (!process.env.DEEPSEEK_API_KEY) {
+      throw new Error("DEEPSEEK_API_KEY is required.");
+    }
+
+    // Connect to MongoDB
     await connectDB();
 
+    // Start Express server
     app.listen(PORT, () => {
       console.log(
         `BizAssist AI server running on port ${PORT}`
       );
     });
+
   } catch (error) {
     console.error(
       "Server startup failed:",
