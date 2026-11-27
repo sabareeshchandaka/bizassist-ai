@@ -23,6 +23,13 @@ import {
 dotenv.config();
 
 const app = express();
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "BizAssist AI backend is online!",
+    health: "/api/health",
+  });
+});
 if(process.env.NODE_ENV === "production"){
   app.set("trust proxy",1);
 }
