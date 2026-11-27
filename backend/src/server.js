@@ -62,19 +62,25 @@ app.use(
 );
 
 // Private APIs: only your frontend origin.
-const allowedOrigins = (
-  process.env.CLIENT_URL || ""
-)
+
+const allowedOrigins = (process.env.CLIENT_URL || "")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-if (process.env.NODE_ENV !== "production") {
-  allowedOrigins.push(
-    "http://localhost:3000",
-    "http://127.0.0.1:3000"
-  );
-}
+const apiCorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(null, false);
+  },
+  credentials: true,
+};
+
+app.use(cors(apiCorsOptions));
+
 
 const corsOptions = {
   origin: (origin, callback) => {
