@@ -170,45 +170,126 @@ export const getAnalyticsOverview = async (req, res) => {
 };
 
 // GET /api/analytics/conversations
+
 export const getWidgetConversations = async (req, res) => {
+  try {
+    const businessId = req.user.business;
 
-const rawPage = Number(req.query.page ?? 1);
-const rawLimit = Number(req.query.limit ?? 10);
+    // 1. Validate pagination parameters
+    const rawPage = Number(req.query.page ?? 1);
+    const rawLimit = Number(req.query.limit ?? 10);
 
-if (
-  !Number.isSafeInteger(rawPage) ||
-  rawPage < 1 ||
-  rawPage > 10000
-) {
-  return res.status(400).json({
-    success: false,
-    message: "Invalid page number.",
-  });
-}
+    if (
+      !Number.isSafeInteger(rawPage) ||
+      rawPage < 1 ||
+      rawPage > 10000
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid page number.",
+      });
+    }
 
-if (
-  !Number.isSafeInteger(rawLimit) ||
-  rawLimit < 1
-) {
-  return res.status(400).json({
-    success: false,
-    message: "Invalid page size.",
-  });
-}
+    if (
+      !Number.isSafeInteger(rawLimit) ||
+      rawLimit < 1
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid page size.",
+      });
+    }
 
-const page = rawPage;
-const limit = Math.min(50, rawLimit);
+    const page = rawPage;
+    const limit = Math.min(50, rawLimit);
+    const skip = (page - 1) * limit;
 
-const search = String(req.query.search || "").trim();
+    // 2. Validate search query
+    const search = String(req.query.search || "").trim();
 
-if (search.length > 100) {
-  return res.status(400).json({
-    success: false,
-    message: "Search query cannot exceed 100 characters.",
-  });
-}
+    if (search.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Search query cannot exceed 100 characters.",
+      });
+    }
 
-}
+    // Escape special regex characters
+    const escapedSearch = search.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&"
+    );
+
+    // 3. Build business-specific database filter
+    const filter = {
+      business: businessId,
+    };
+
+    if (search) {
+      filter.$or = [
+        {
+          firstMessage: {
+            $regex: escapedSearch,
+            $options: "i",
+          },
+        },
+        {
+          visitorId: {
+            $regex: escapedSearch,
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    // 4. Get total matching conversations
+    const totalConversations =
+      await WidgetConversation.countDocuments(filter);
+
+    // 5. Fetch paginated conversations
+    const conversations = await WidgetConversation.find(filter)
+      .select(
+        "visitorId firstMessage messageCount userMessageCount assistantMessageCount lastMessageAt status createdAt"
+      )
+      .sort({
+        lastMessageAt: -1,
+        createdAt: -1,
+      })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // 6. Calculate pagination information
+    const totalPages = Math.ceil(
+      totalConversations / limit
+    );
+
+    // 7. Return response
+    return res.status(200).json({
+      success: true,
+      conversations,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalConversations,
+        limit,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+    });
+
+  } catch (error) {
+    console.error(
+      "[CONVERSATION HISTORY] List error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load conversations",
+    });
+  }
+};
 
 
 // GET /api/analytics/conversations/:conversationId
